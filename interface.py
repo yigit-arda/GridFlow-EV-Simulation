@@ -4,11 +4,12 @@ import sys
 import random
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QWidget, QProgressBar, QLineEdit, QFrame, QComboBox, QStackedWidget
+    QGridLayout, QWidget, QProgressBar, QLineEdit, QFrame, QComboBox, QStackedWidget,
+    QScrollArea
 )
 from PyQt6.QtGui import (
     QIntValidator, QDoubleValidator, QPainter, QPen, QColor, QFont,
-    QLinearGradient, QPainterPath, QBrush
+    QLinearGradient, QPainterPath, QBrush, QPolygonF
 )
 from PyQt6.QtCore import Qt, QPointF
 
@@ -112,6 +113,8 @@ my_station_ptr = gridflow_lib.initStation(500.0, 4)
 
 DARK_STYLESHEET = """
     QMainWindow, QWidget#Page { background-color: #121212; }
+    QScrollArea { background-color: #121212; border: none; }
+    QScrollArea > QWidget > QWidget { background-color: #121212; }
     QLabel { color: #ffffff; font-family: 'Segoe UI'; }
     QPushButton {
         background-color: #2e7d32; color: white; padding: 10px;
@@ -145,7 +148,7 @@ class LineChartWidget(QWidget):
         self.line_color = QColor(color)
         self.unit = unit
         self.points = []  # list of (x, y)
-        self.setMinimumHeight(190)
+        self.setMinimumHeight(210)
 
     def set_data(self, points):
         self.points = points
@@ -285,15 +288,20 @@ class StatsPage(QWidget):
         layout.addLayout(top_row)
 
         title = QLabel("\U0001F4CA Station Revenue & Statistics")
-        title.setStyleSheet("font-size: 24px; font-weight: bold;")
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
         layout.addWidget(title)
-        layout.addSpacing(10)
+        layout.addSpacing(8)
 
-        self.row_charge = self._build_row(layout, "\u26A1 Charging Revenue (energy)", "\u20ba0.0")
-        self.row_penalty = self._build_row(layout, "\u23F3 Penalty Revenue (idle fees)", "\u20ba0.0")
-        self.row_total = self._build_row(layout, "\U0001F4B0 Total Lifetime Revenue", "\u20ba0.0")
-        self.row_pending = self._build_row(layout, "\U0001F50C Currently Pending (not yet unplugged)", "\u20ba0.0")
-        self.row_sessions = self._build_row(layout, "\U0001F697 Vehicles Served So Far", "0")
+        # Compact tile grid instead of five tall full-width rows - same
+        # information, far less vertical space.
+        tiles_grid = QGridLayout()
+        tiles_grid.setSpacing(12)
+        self.row_charge = self._build_tile(tiles_grid, 0, 0, "\u26A1 Charging Revenue", "\u20ba0.0")
+        self.row_penalty = self._build_tile(tiles_grid, 0, 1, "\u23F3 Penalty Revenue", "\u20ba0.0")
+        self.row_total = self._build_tile(tiles_grid, 0, 2, "\U0001F4B0 Total Lifetime Revenue", "\u20ba0.0")
+        self.row_pending = self._build_tile(tiles_grid, 1, 0, "\U0001F50C Currently Pending", "\u20ba0.0")
+        self.row_sessions = self._build_tile(tiles_grid, 1, 1, "\U0001F697 Vehicles Served", "0")
+        layout.addLayout(tiles_grid)
 
         note = QLabel(
             "Note: Charging Revenue and Penalty Revenue are added to the lifetime "
@@ -302,10 +310,10 @@ class StatsPage(QWidget):
             "in the lifetime total above."
         )
         note.setWordWrap(True)
-        note.setStyleSheet("font-size: 12px; color: #888888;")
-        layout.addSpacing(6)
+        note.setStyleSheet("font-size: 11px; color: #888888;")
+        layout.addSpacing(4)
         layout.addWidget(note)
-        layout.addSpacing(16)
+        layout.addSpacing(12)
 
         charts_title = QLabel("\U0001F4C8 Over Time")
         charts_title.setStyleSheet("font-size: 16px; font-weight: bold;")
@@ -336,20 +344,20 @@ class StatsPage(QWidget):
         layout.addStretch()
         self.setLayout(layout)
 
-    def _build_row(self, parent_layout, title, initial_value):
+    def _build_tile(self, grid_layout, row, col, title, initial_value):
         frame = QFrame()
-        frame.setObjectName("StatRow")
-        row = QHBoxLayout()
-        row.setContentsMargins(18, 14, 18, 14)
+        frame.setObjectName("StatCard")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(15, 10, 15, 10)
         lbl_title = QLabel(title)
-        lbl_title.setStyleSheet("font-size: 14px; color: #bdbdbd;")
+        lbl_title.setStyleSheet("font-size: 12px; color: #9e9e9e;")
+        lbl_title.setWordWrap(True)
         lbl_value = QLabel(initial_value)
-        lbl_value.setStyleSheet("font-size: 18px; font-weight: bold;")
-        row.addWidget(lbl_title)
-        row.addStretch()
-        row.addWidget(lbl_value)
-        frame.setLayout(row)
-        parent_layout.addWidget(frame)
+        lbl_value.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(lbl_title)
+        layout.addWidget(lbl_value)
+        frame.setLayout(layout)
+        grid_layout.addWidget(frame, row, col)
         return lbl_value
 
     def refresh(self):
@@ -374,10 +382,277 @@ class StatsPage(QWidget):
         self.revenue_chart.set_data(self.history_revenue)
 
 
+class IsoCanvas(QWidget):
+    """The isometric charging-yard drawing surface. Pure QPainter, same
+    projection math as the HTML concept preview - no extra dependency
+    (no Qt3D, no WebEngine). Reads only through the getters already used
+    by SimulationPage.sync_ui(); it never touches ctypes/plugVehicle
+    itself, so the simulation logic in C is completely untouched."""
+
+    CANVAS_W = 980
+    CANVAS_H = 560
+    ORIGIN_X = 490
+    ORIGIN_Y = 160
+    TILE_W = 210
+    TILE_H = 105
+    STATUS_COLOR = {"CHARGING": "#4caf50", "FINISHED": "#ffeb3b", "PENALTY": "#f44336"}
+    STATUS_TEXT = {"CHARGING": "CHARGING", "FINISHED": "FINISHED (GRACE)", "PENALTY": "IDLE PENALTY"}
+    BAY_POSITIONS = [(0, 0), (1, 0), (0, 1), (1, 1)]
+
+    def __init__(self, station_ptr):
+        super().__init__()
+        self.station_ptr = station_ptr
+        self.bays = [{"type": "AC", "status": "EMPTY"} for _ in range(4)]
+        self.queue = []
+        self.queue_total = 0
+        self.grid_load = 0.0
+        self.max_cap = 500.0
+        self.clock_str = "--:--"
+        self.setMinimumHeight(480)
+        self.refresh()
+
+    def refresh(self):
+        bays = []
+        for i in range(4):
+            socket_id = i + 1
+            charge_type = gridflow_lib.getSocketChargeType(self.station_ptr, socket_id)
+            type_name = "AC" if charge_type == AC_TYPE2 else "DC"
+            full = gridflow_lib.isSocketFull(self.station_ptr, socket_id)
+            if not full:
+                bays.append({"type": type_name, "status": "EMPTY"})
+                continue
+            plate_raw = gridflow_lib.getPlateAt(self.station_ptr, socket_id)
+            plate = plate_raw.decode('utf-8') if plate_raw else "?"
+            soc = gridflow_lib.getSocketSOC(self.station_ptr, socket_id)
+            target = gridflow_lib.getTargetSOC(self.station_ptr, socket_id)
+            fee = gridflow_lib.getIdleFee(self.station_ptr, socket_id)
+            if soc >= target:
+                status = "PENALTY" if fee > 0 else "FINISHED"
+            else:
+                status = "CHARGING"
+            bays.append({"type": type_name, "status": status, "plate": plate, "soc": soc})
+        self.bays = bays
+
+        qsize = gridflow_lib.getQueueSize(self.station_ptr)
+        queue = []
+        for idx in range(min(qsize, 6)):
+            p = gridflow_lib.getQueuePlateAt(self.station_ptr, idx)
+            queue.append(p.decode('utf-8') if p else "?")
+        self.queue = queue
+        self.queue_total = qsize
+
+        self.grid_load = gridflow_lib.getTotalPower(self.station_ptr)
+        self.max_cap = gridflow_lib.getMaxCapacity(self.station_ptr)
+        clock_min = gridflow_lib.getStationClock(self.station_ptr)
+        self.clock_str = f"{(clock_min // 60) % 24:02d}:{clock_min % 60:02d}"
+
+        self.update()
+
+    # ---------- drawing helpers ----------
+
+    def _tile_pos(self, col, row):
+        x = self.ORIGIN_X + (col - row) * (self.TILE_W / 2)
+        y = self.ORIGIN_Y + (col + row) * (self.TILE_H / 2)
+        return x, y
+
+    def _iso_box(self, painter, cx, cy, hw, hd, h, base_color):
+        top_c = base_color.lighter(130)
+        left_c = base_color.darker(115)
+        right_c = base_color.darker(145)
+
+        b_right = QPointF(cx + hw, cy)
+        b_bottom = QPointF(cx, cy + hd)
+        b_left = QPointF(cx - hw, cy)
+        t_top = QPointF(cx, cy - hd - h)
+        t_right = QPointF(cx + hw, cy - h)
+        t_bottom = QPointF(cx, cy + hd - h)
+        t_left = QPointF(cx - hw, cy - h)
+
+        painter.setPen(QPen(QColor(0, 0, 0, 90), 1))
+
+        painter.setBrush(QBrush(right_c))
+        painter.drawPolygon(QPolygonF([b_right, b_bottom, t_bottom, t_right]))
+
+        painter.setBrush(QBrush(left_c))
+        painter.drawPolygon(QPolygonF([b_left, b_bottom, t_bottom, t_left]))
+
+        painter.setBrush(QBrush(top_c))
+        painter.drawPolygon(QPolygonF([t_top, t_right, t_bottom, t_left]))
+
+    def _floor_diamond(self, painter, cx, cy):
+        pts = [
+            QPointF(cx, cy - self.TILE_H / 2 + 6),
+            QPointF(cx + self.TILE_W / 2 - 6, cy),
+            QPointF(cx, cy + self.TILE_H / 2 - 6),
+            QPointF(cx - self.TILE_W / 2 + 6, cy),
+        ]
+        painter.setPen(QPen(QColor("#333333"), 1.5))
+        painter.setBrush(QBrush(QColor("#1e1e1e")))
+        painter.drawPolygon(QPolygonF(pts))
+
+    def _text_center(self, painter, x, y, s, font, color):
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+        fm = painter.fontMetrics()
+        w = fm.horizontalAdvance(s)
+        painter.drawText(int(x - w / 2), int(y), s)
+
+    def _draw_bay(self, painter, col, row, socket_id, data):
+        cx, cy = self._tile_pos(col, row)
+        self._floor_diamond(painter, cx, cy)
+
+        type_name = data["type"]
+        status = data["status"]
+        type_color = QColor(AC_COLOR if type_name == "AC" else DC_COLOR)
+
+        pole_x, pole_y = cx, cy - self.TILE_H / 2 + 14
+        pole_color = QColor("#3a3a3a") if status == "EMPTY" else type_color
+        self._iso_box(painter, pole_x, pole_y, 6, 6, 46, pole_color)
+
+        if status == "CHARGING":
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(type_color))
+            painter.drawEllipse(QPointF(pole_x, pole_y - 50), 5, 5)
+
+        if status != "EMPTY":
+            car_x, car_y = cx + 18, cy + 6
+            status_color = QColor(self.STATUS_COLOR.get(status, "#888888"))
+
+            cable_pen = QPen(type_color, 2.5, Qt.PenStyle.DashLine)
+            painter.setPen(cable_pen)
+            painter.drawLine(QPointF(pole_x, pole_y - 40), QPointF(car_x - 10, car_y - 14))
+
+            self._iso_box(painter, car_x, car_y, 34, 20, 26, status_color)
+
+            gauge_x, gauge_y = cx - self.TILE_W / 2 + 26, cy + self.TILE_H / 2 - 10
+            gauge_max_h = 60
+            soc = data.get("soc", 0.0)
+            fill_h = max(4.0, gauge_max_h * (soc / 100.0))
+            self._iso_box(painter, gauge_x, gauge_y, 10, 10, 4, QColor("#2a2a2a"))
+            gauge_color = QColor("#f44336") if soc < LOW_BATTERY_THRESHOLD else type_color
+            self._iso_box(painter, gauge_x, gauge_y - 4, 7, 7, fill_h, gauge_color)
+
+        label_y = cy + self.TILE_H / 2 + 26
+        self._text_center(painter, cx, label_y, f"Socket {socket_id} | {type_name}",
+                           QFont("Segoe UI", 11, QFont.Weight.Bold), "#ffffff")
+        if status == "EMPTY":
+            self._text_center(painter, cx, label_y + 16, "EMPTY", QFont("Segoe UI", 9), "#8a8a8a")
+        else:
+            plate = data.get("plate", "?")
+            soc = data.get("soc", 0.0)
+            self._text_center(painter, cx, label_y + 16, f"{plate}  |  SOC {soc:.0f}%",
+                               QFont("Segoe UI", 9), "#8a8a8a")
+            self._text_center(painter, cx, label_y + 32, self.STATUS_TEXT[status],
+                               QFont("Segoe UI", 9, QFont.Weight.Bold), self.STATUS_COLOR[status])
+
+    def _draw_power_gauge(self, painter):
+        cx, cy, r = 130, 130, 70
+
+        bg_path = QPainterPath()
+        bg_path.arcMoveTo(cx - r, cy - r, r * 2, r * 2, 180)
+        bg_path.arcTo(cx - r, cy - r, r * 2, r * 2, 180, 180)
+        bg_pen = QPen(QColor("#2a2a2a"), 14)
+        bg_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(bg_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(bg_path)
+
+        frac = min(1.0, self.grid_load / self.max_cap) if self.max_cap > 0 else 0.0
+        fg_path = QPainterPath()
+        fg_path.arcMoveTo(cx - r, cy - r, r * 2, r * 2, 180)
+        fg_path.arcTo(cx - r, cy - r, r * 2, r * 2, 180, frac * 180)
+        fg_color = "#f44336" if frac > 0.85 else "#42a5f5"
+        fg_pen = QPen(QColor(fg_color), 14)
+        fg_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(fg_pen)
+        painter.drawPath(fg_path)
+
+        self._text_center(painter, cx, cy - 6, "GRID LOAD", QFont("Segoe UI", 8), "#8a8a8a")
+        self._text_center(painter, cx, cy + 16, f"{self.grid_load:.0f} / {self.max_cap:.0f} kW",
+                           QFont("Segoe UI", 12, QFont.Weight.Bold), "#ffffff")
+
+    def _draw_clock(self, painter):
+        self._text_center(painter, 130, 240, "SIMULATED CLOCK", QFont("Segoe UI", 8), "#8a8a8a")
+        self._text_center(painter, 130, 268, self.clock_str, QFont("Segoe UI", 14, QFont.Weight.Bold), "#ffffff")
+
+    def _draw_queue(self, painter):
+        start_x, start_y = 760, 90
+        self._text_center(painter, start_x + 40, start_y - 20, f"WAITING QUEUE ({self.queue_total})",
+                           QFont("Segoe UI", 8), "#8a8a8a")
+        for idx, plate in enumerate(self.queue):
+            cx, cy = start_x, start_y + idx * 30
+            self._iso_box(painter, cx, cy, 16, 10, 12, QColor("#607d8b"))
+            painter.setFont(QFont("Segoe UI", 9))
+            painter.setPen(QColor("#8a8a8a"))
+            painter.drawText(int(cx + 26), int(cy + 2), plate)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#121212"))
+
+        scale = min(self.width() / self.CANVAS_W, self.height() / self.CANVAS_H)
+        if scale <= 0:
+            painter.end()
+            return
+        offset_x = (self.width() - self.CANVAS_W * scale) / 2
+        offset_y = (self.height() - self.CANVAS_H * scale) / 2
+        painter.translate(offset_x, offset_y)
+        painter.scale(scale, scale)
+
+        self._draw_power_gauge(painter)
+        self._draw_clock(painter)
+        self._draw_queue(painter)
+
+        for i, bay in enumerate(self.bays):
+            col, row = self.BAY_POSITIONS[i]
+            self._draw_bay(painter, col, row, i + 1, bay)
+
+        painter.end()
+
+
+class IsoPage(QWidget):
+    """Full-page wrapper around IsoCanvas: back button + title, matching
+    the same pattern as StatsPage so navigation feels consistent."""
+
+    def __init__(self, station_ptr, on_back):
+        super().__init__()
+        self.setObjectName("Page")
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(30, 20, 30, 20)
+        layout.setSpacing(10)
+
+        top_row = QHBoxLayout()
+        btn_back = QPushButton("\u2190 Back to Simulation")
+        btn_back.setStyleSheet("background-color: #455a64;")
+        btn_back.clicked.connect(on_back)
+        top_row.addWidget(btn_back)
+        top_row.addStretch()
+        layout.addLayout(top_row)
+
+        title = QLabel("Isometric Station View")
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        layout.addWidget(title)
+
+        note = QLabel("A different view of the same live data - the simulation logic and data all still come from the C library.")
+        note.setStyleSheet("font-size: 12px; color: #888888;")
+        layout.addWidget(note)
+        layout.addSpacing(6)
+
+        self.canvas = IsoCanvas(station_ptr)
+        layout.addWidget(self.canvas)
+
+        self.setLayout(layout)
+
+    def refresh(self):
+        self.canvas.refresh()
+
+
 class SimulationPage(QWidget):
     """The main 2x2 charging-socket dashboard and controls."""
 
-    def __init__(self, station_ptr, on_open_stats, on_data_point=None):
+    def __init__(self, station_ptr, on_open_stats, on_open_iso=None, on_data_point=None):
         super().__init__()
         self.station_ptr = station_ptr
         self.total_sockets = 4
@@ -394,7 +669,13 @@ class SimulationPage(QWidget):
         header_row.addWidget(title_label)
         header_row.addStretch()
 
-        btn_stats = QPushButton("\U0001F4CA Statistics")
+        if on_open_iso is not None:
+            btn_iso = QPushButton("3D View")
+            btn_iso.setStyleSheet("background-color: #00695c;")
+            btn_iso.clicked.connect(on_open_iso)
+            header_row.addWidget(btn_iso)
+
+        btn_stats = QPushButton("Statistics")
         btn_stats.setStyleSheet("background-color: #6a1b9a;")
         btn_stats.clicked.connect(on_open_stats)
         header_row.addWidget(btn_stats)
@@ -419,9 +700,8 @@ class SimulationPage(QWidget):
         self.cards_layout = QGridLayout()
         self.cards_layout.setSpacing(20)
 
-        self.ui_type_labels = []
         self.ui_status_labels = []
-        self.ui_waiting_labels = []
+        self.ui_content_stacks = []
         self.ui_plate_labels = []
         self.ui_soc_labels = []
         self.ui_power_labels = []
@@ -436,16 +716,27 @@ class SimulationPage(QWidget):
             card_layout = QVBoxLayout()
             card_layout.setContentsMargins(20, 20, 20, 20)
 
+            charge_type = gridflow_lib.getSocketChargeType(self.station_ptr, socket_id)
+            type_icon = "\U0001F50C" if charge_type == AC_TYPE2 else "\u26A1"
+            type_name = "AC (Type 2)" if charge_type == AC_TYPE2 else "DC (CCS)"
+            type_color = AC_COLOR if charge_type == AC_TYPE2 else DC_COLOR
+
+            # A socket's connector type never changes at runtime, so this is
+            # set once here - and as two separate PLAIN labels (not one
+            # label with an HTML <span> for the color) so there is nothing
+            # for a rich-text parser to trip over.
             header_layout = QHBoxLayout()
-            lbl_type = QLabel()
-            lbl_type.setStyleSheet("font-size: 16px; font-weight: bold;")
-            self.ui_type_labels.append(lbl_type)
+            lbl_socket = QLabel(f"{type_icon} Socket {socket_id} |")
+            lbl_socket.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+            lbl_type_name = QLabel(type_name)
+            lbl_type_name.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {type_color};")
 
             lbl_status = QLabel("\u26AA EMPTY")
             lbl_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #9e9e9e;")
             self.ui_status_labels.append(lbl_status)
 
-            header_layout.addWidget(lbl_type)
+            header_layout.addWidget(lbl_socket)
+            header_layout.addWidget(lbl_type_name)
             header_layout.addStretch()
             header_layout.addWidget(lbl_status)
             card_layout.addLayout(header_layout)
@@ -459,43 +750,59 @@ class SimulationPage(QWidget):
             card_layout.addWidget(bar)
             card_layout.addSpacing(10)
 
-            # Each data row is its own plain-text QLabel rather than one
-            # combined rich-text block with manual <br> line breaks - a
-            # single HTML blob is fragile (a parsing hiccup can silently
-            # drop everything after the first line). Separate widgets can't
-            # do that: each line is guaranteed its own space in the layout.
+            # The "empty" vs "occupied" detail area is two separate pages of
+            # a QStackedWidget, not the same labels toggled with
+            # setVisible(). Repeatedly show/hide-ing several sibling labels
+            # inside one QVBoxLayout was what caused the header/detail text
+            # to visually overlap after a socket's first fill - QStackedWidget
+            # is Qt's dedicated, well-tested tool for swapping a content
+            # area and doesn't have that failure mode. It also keeps every
+            # card the same height, whether empty or occupied.
+            content_stack = QStackedWidget()
+            content_stack.setMinimumHeight(100)
+
+            empty_page = QWidget()
+            empty_page_layout = QVBoxLayout()
+            empty_page_layout.setContentsMargins(0, 0, 0, 0)
             lbl_waiting = QLabel("Waiting for connection...")
             lbl_waiting.setStyleSheet("font-size: 14px; color: #777777;")
-            self.ui_waiting_labels.append(lbl_waiting)
-            card_layout.addWidget(lbl_waiting)
+            empty_page_layout.addWidget(lbl_waiting)
+            empty_page_layout.addStretch()
+            empty_page.setLayout(empty_page_layout)
+
+            full_page = QWidget()
+            full_page_layout = QVBoxLayout()
+            full_page_layout.setContentsMargins(0, 0, 0, 0)
+            full_page_layout.setSpacing(4)
 
             lbl_plate = QLabel()
             lbl_plate.setStyleSheet("font-size: 14px; color: #e0e0e0;")
-            lbl_plate.setVisible(False)
             self.ui_plate_labels.append(lbl_plate)
-            card_layout.addWidget(lbl_plate)
+            full_page_layout.addWidget(lbl_plate)
 
             lbl_soc = QLabel()
             lbl_soc.setStyleSheet("font-size: 14px; color: #e0e0e0;")
-            lbl_soc.setVisible(False)
             self.ui_soc_labels.append(lbl_soc)
-            card_layout.addWidget(lbl_soc)
+            full_page_layout.addWidget(lbl_soc)
 
             lbl_power = QLabel()
             lbl_power.setStyleSheet("font-size: 14px; color: #e0e0e0;")
-            lbl_power.setVisible(False)
             self.ui_power_labels.append(lbl_power)
-            card_layout.addWidget(lbl_power)
+            full_page_layout.addWidget(lbl_power)
 
             lbl_cost = QLabel()
             lbl_cost.setStyleSheet("font-size: 14px; color: #e0e0e0;")
-            lbl_cost.setVisible(False)
             self.ui_cost_labels.append(lbl_cost)
-            card_layout.addWidget(lbl_cost)
+            full_page_layout.addWidget(lbl_cost)
+            full_page_layout.addStretch()
+            full_page.setLayout(full_page_layout)
 
-            card_layout.addStretch()
+            content_stack.addWidget(empty_page)   # index 0
+            content_stack.addWidget(full_page)    # index 1
+            self.ui_content_stacks.append(content_stack)
+            card_layout.addWidget(content_stack)
 
-            btn_unplug = QPushButton("\U0001F50C Unplug Vehicle")
+            btn_unplug = QPushButton("Unplug Vehicle")
             btn_unplug.setEnabled(False)
             btn_unplug.clicked.connect(lambda checked, sid=socket_id: self.unplug_car(sid))
             self.ui_unplug_btns.append(btn_unplug)
@@ -525,7 +832,7 @@ class SimulationPage(QWidget):
         # ---------- CONTROL PANEL ----------
         control_layout = QHBoxLayout()
 
-        self.btn_add_ac = QPushButton("\U0001F50C + AC Vehicle (Type 2)")
+        self.btn_add_ac = QPushButton("+ AC Vehicle (Type 2)")
         self.btn_add_ac.setStyleSheet(f"background-color: #1976d2;")
         self.btn_add_ac.clicked.connect(lambda: self.add_random_car(AC_TYPE2))
 
@@ -559,53 +866,63 @@ class SimulationPage(QWidget):
         main_layout.addSpacing(15)
 
         # ---------- MANUAL VEHICLE ENTRY ----------
+        # Split across two shorter rows instead of one long one, so this
+        # section never forces the window/cards wider than they need to be.
         manual_frame = QFrame()
         manual_frame.setObjectName("Card")
         manual_outer = QVBoxLayout()
-        manual_title = QLabel("\u270D\uFE0F Manual Vehicle Entry")
+        manual_title = QLabel("Manual Vehicle Entry")
         manual_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #90caf9;")
         manual_outer.addWidget(manual_title)
 
-        manual_row = QHBoxLayout()
+        manual_row1 = QHBoxLayout()
 
         self.manual_plate_input = QLineEdit()
         self.manual_plate_input.setPlaceholderText("Plate (optional)")
-        self.manual_plate_input.setFixedWidth(140)
+        self.manual_plate_input.setFixedWidth(130)
 
         self.manual_type_combo = QComboBox()
         self.manual_type_combo.addItems(["AC (Type 2)", "DC (CCS)"])
+        self.manual_type_combo.setFixedWidth(120)
 
         self.manual_start_input = QLineEdit()
         self.manual_start_input.setPlaceholderText("Start SOC %")
         self.manual_start_input.setValidator(QDoubleValidator(0.0, 99.0, 1))
-        self.manual_start_input.setFixedWidth(90)
+        self.manual_start_input.setFixedWidth(85)
 
         self.manual_target_input = QLineEdit()
         self.manual_target_input.setPlaceholderText("Target SOC %")
         self.manual_target_input.setValidator(QDoubleValidator(1.0, 100.0, 1))
-        self.manual_target_input.setFixedWidth(90)
+        self.manual_target_input.setFixedWidth(85)
+
+        manual_row1.addWidget(self.manual_plate_input)
+        manual_row1.addWidget(self.manual_type_combo)
+        manual_row1.addWidget(self.manual_start_input)
+        manual_row1.addWidget(self.manual_target_input)
+        manual_row1.addStretch()
+        manual_outer.addLayout(manual_row1)
+
+        manual_row2 = QHBoxLayout()
 
         self.manual_power_input = QLineEdit()
         self.manual_power_input.setPlaceholderText("Max Power kW")
         self.manual_power_input.setValidator(QDoubleValidator(0.1, 400.0, 1))
         self.manual_power_input.setFixedWidth(100)
 
-        self.btn_add_manual = QPushButton("\u2795 Add Custom Vehicle")
+        self.btn_add_manual = QPushButton("Add Custom Vehicle")
         self.btn_add_manual.setStyleSheet("background-color: #6a1b9a;")
         self.btn_add_manual.clicked.connect(self.add_manual_car)
 
-        manual_row.addWidget(self.manual_plate_input)
-        manual_row.addWidget(self.manual_type_combo)
-        manual_row.addWidget(self.manual_start_input)
-        manual_row.addWidget(self.manual_target_input)
-        manual_row.addWidget(self.manual_power_input)
-        manual_row.addWidget(self.btn_add_manual)
-        manual_row.addStretch()
-
-        manual_outer.addLayout(manual_row)
         manual_hint = QLabel("Leave plate empty for an auto-generated one. Uses the Priority selected above.")
         manual_hint.setStyleSheet("font-size: 11px; color: #666666;")
-        manual_outer.addWidget(manual_hint)
+
+        manual_row2.addWidget(self.manual_power_input)
+        manual_row2.addWidget(self.btn_add_manual)
+        manual_row2.addSpacing(10)
+        manual_row2.addWidget(manual_hint)
+        manual_row2.addStretch()
+        manual_outer.addLayout(manual_row2)
+
         manual_frame.setLayout(manual_outer)
         main_layout.addWidget(manual_frame)
 
@@ -682,7 +999,7 @@ class SimulationPage(QWidget):
             self.info_label.setStyleSheet("color: #f44336; font-size: 15px; font-weight: bold;")
             return
 
-        if not (0.0 <= start_soc < 100.0) or not (start_soc < target_soc <= 100.0) or power <= 0.0:
+        if not (0.0 <= start_soc < 100.0) or not (start_soc < target_soc <= 100.0) or not (0.0 < power <= 400.0):
             self.info_label.setText("\u274C Check your values: 0 \u2264 Start < Target \u2264 100, and Power > 0.")
             self.info_label.setStyleSheet("color: #f44336; font-size: 15px; font-weight: bold;")
             return
@@ -748,11 +1065,6 @@ class SimulationPage(QWidget):
 
         for i in range(self.total_sockets):
             socket_id = i + 1
-            charge_type = gridflow_lib.getSocketChargeType(self.station_ptr, socket_id)
-            type_icon = "\U0001F50C" if charge_type == AC_TYPE2 else "\u26A1"
-            type_name = "AC (Type 2)" if charge_type == AC_TYPE2 else "DC (CCS)"
-            type_color = AC_COLOR if charge_type == AC_TYPE2 else DC_COLOR
-            self.ui_type_labels[i].setText(f"{type_icon} Socket {socket_id} | <span style='color:{type_color}'>{type_name}</span>")
 
             full = gridflow_lib.isSocketFull(self.station_ptr, socket_id)
 
@@ -761,11 +1073,7 @@ class SimulationPage(QWidget):
                 self.ui_status_labels[i].setStyleSheet("font-size: 14px; font-weight: bold; color: #9e9e9e;")
                 self.ui_progress_bars[i].setValue(0)
                 self.update_bar_style(i, is_empty=True)
-                self.ui_waiting_labels[i].setVisible(True)
-                self.ui_plate_labels[i].setVisible(False)
-                self.ui_soc_labels[i].setVisible(False)
-                self.ui_power_labels[i].setVisible(False)
-                self.ui_cost_labels[i].setVisible(False)
+                self.ui_content_stacks[i].setCurrentIndex(0)
                 self.ui_unplug_btns[i].setText("\u2014 Empty Socket \u2014")
                 self.ui_unplug_btns[i].setEnabled(False)
                 # Dimmed look: an empty socket's button shouldn't draw the eye.
@@ -785,18 +1093,14 @@ class SimulationPage(QWidget):
             finish_min = gridflow_lib.getExpectedFinishReal(self.station_ptr, socket_id)
             finish_str = f"{(finish_min // 60) % 24:02d}:{finish_min % 60:02d}" if finish_min >= 0 else "--:--"
 
-            self.ui_unplug_btns[i].setText("\U0001F50C Unplug Vehicle")
+            self.ui_unplug_btns[i].setText("Unplug Vehicle")
             self.ui_unplug_btns[i].setEnabled(True)
             self.ui_unplug_btns[i].setStyleSheet(
                 "background-color: #d32f2f; color: white; font-weight: bold;"
             )
             self.ui_progress_bars[i].setValue(int(soc))
 
-            self.ui_waiting_labels[i].setVisible(False)
-            self.ui_plate_labels[i].setVisible(True)
-            self.ui_soc_labels[i].setVisible(True)
-            self.ui_power_labels[i].setVisible(True)
-            self.ui_cost_labels[i].setVisible(True)
+            self.ui_content_stacks[i].setCurrentIndex(1)
 
             self.ui_plate_labels[i].setText(f"\U0001F697 Plate: {plate}")
 
@@ -870,16 +1174,42 @@ class GridFlowApp(QMainWindow):
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
 
-        self.simulation_page = SimulationPage(
-            station_ptr, on_open_stats=self.show_stats_page, on_data_point=self.record_history
-        )
+        # Created before SimulationPage: SimulationPage's constructor calls
+        # sync_ui() internally, which fires on_data_point -> record_history,
+        # and record_history refreshes iso_page - so iso_page must already
+        # exist by then.
         self.stats_page = StatsPage(
             station_ptr, on_back=self.show_simulation_page,
             history_load=self.history_load, history_revenue=self.history_revenue,
         )
+        self.iso_page = IsoPage(station_ptr, on_back=self.show_simulation_page)
 
-        self.stack.addWidget(self.simulation_page)   # index 0
-        self.stack.addWidget(self.stats_page)         # index 1
+        self.simulation_page = SimulationPage(
+            station_ptr, on_open_stats=self.show_stats_page, on_open_iso=self.show_iso_page,
+            on_data_point=self.record_history,
+        )
+
+        # All pages are wrapped in a QScrollArea: if a window gets resized
+        # small (or a page's content is simply taller than the available
+        # space), it scrolls instead of squeezing/overlapping its widgets.
+        sim_scroll = QScrollArea()
+        sim_scroll.setWidgetResizable(True)
+        sim_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sim_scroll.setWidget(self.simulation_page)
+
+        stats_scroll = QScrollArea()
+        stats_scroll.setWidgetResizable(True)
+        stats_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        stats_scroll.setWidget(self.stats_page)
+
+        iso_scroll = QScrollArea()
+        iso_scroll.setWidgetResizable(True)
+        iso_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        iso_scroll.setWidget(self.iso_page)
+
+        self.stack.addWidget(sim_scroll)     # index 0
+        self.stack.addWidget(stats_scroll)   # index 1
+        self.stack.addWidget(iso_scroll)     # index 2
         self.stack.setCurrentIndex(0)
 
     def record_history(self, elapsed_minutes, grid_load_kw, lifetime_revenue):
@@ -888,10 +1218,15 @@ class GridFlowApp(QMainWindow):
         if len(self.history_load) > self.history_cap:
             self.history_load.pop(0)
             self.history_revenue.pop(0)
+        self.iso_page.refresh()
 
     def show_stats_page(self):
         self.stats_page.refresh()
         self.stack.setCurrentIndex(1)
+
+    def show_iso_page(self):
+        self.iso_page.refresh()
+        self.stack.setCurrentIndex(2)
 
     def show_simulation_page(self):
         self.simulation_page.sync_ui()
