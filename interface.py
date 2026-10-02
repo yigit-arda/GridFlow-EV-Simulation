@@ -1,3 +1,5 @@
+# interface.py
+
 import ctypes
 import os
 import sys
@@ -13,10 +15,12 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import Qt, QPointF, QRectF
 
+# Load the compiled C library dynamically
 dll_path = os.path.abspath('./gridflow.dll')
 gridflow_lib = ctypes.CDLL(dll_path)
 
 # --- C Function Signatures ---
+# Explicitly define argument and return types to prevent memory corruption and ensure safe data bridging between Python and C.
 gridflow_lib.initStation.argtypes = [ctypes.c_float, ctypes.c_int]
 gridflow_lib.initStation.restype = ctypes.c_void_p
 
@@ -94,6 +98,7 @@ gridflow_lib.getLifetimePenaltyRevenue.restype = ctypes.c_float
 gridflow_lib.getLifetimeSessionCount.argtypes = [ctypes.c_void_p]
 gridflow_lib.getLifetimeSessionCount.restype = ctypes.c_int
 
+# Enum equivalents defined in C
 AC_TYPE2 = 0
 DC_CCS = 1
 
@@ -115,6 +120,7 @@ DC_COLOR = "#26a69a"
 # view (cards, statistics, isometric scene) derives its layout from this.
 NUM_SOCKETS = 4
 
+# Initialize the main C station struct in memory
 my_station_ptr = gridflow_lib.initStation(500.0, NUM_SOCKETS)
 
 
@@ -154,14 +160,16 @@ class LineChartWidget(QWidget):
         self.title = title
         self.line_color = QColor(color)
         self.unit = unit
-        self.points = []  # list of (x, y)
+        self.points = []  # list of (x, y) coordinates representing time and value
         self.setMinimumHeight(210)
 
     def set_data(self, points):
+        # Update the dataset and request a repaint
         self.points = points
         self.update()
 
     def paintEvent(self, event):
+        # Primary rendering loop for the chart, applying antialiasing for smooth lines
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
@@ -171,6 +179,7 @@ class LineChartWidget(QWidget):
         painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         painter.drawText(12, 22, self.title)
 
+        # Ensure we have enough data points to form a line
         if len(self.points) < 2:
             painter.setPen(QColor("#666666"))
             painter.setFont(QFont("Segoe UI", 9))
@@ -183,20 +192,25 @@ class LineChartWidget(QWidget):
         plot_w = max(1, w - margin_left - margin_right)
         plot_h = max(1, h - margin_top - margin_bottom)
 
+        # Extract axes values to determine the dynamic scaling bounds
         xs = [p[0] for p in self.points]
         ys = [p[1] for p in self.points]
         x_min, x_max = min(xs), max(xs)
         y_min, y_max = min(0.0, min(ys)), max(ys)
+        
+        # Prevent division by zero if all values are identical
         if x_max == x_min:
             x_max = x_min + 1
         if y_max == y_min:
             y_max = y_min + 1
 
+        # Helper function to map data values to physical screen pixels
         def to_screen(px, py):
             sx = margin_left + (px - x_min) / (x_max - x_min) * plot_w
             sy = margin_top + (1 - (py - y_min) / (y_max - y_min)) * plot_h
             return QPointF(sx, sy)
 
+        # Draw horizontal grid lines and Y-axis labels
         for i in range(4):
             frac = i / 3
             y_val = y_min + frac * (y_max - y_min)
@@ -222,6 +236,7 @@ class LineChartWidget(QWidget):
         area_path.lineTo(last_pt.x(), baseline_y)
         area_path.closeSubpath()
 
+        # Apply a vertical gradient inside the filled area
         gradient = QLinearGradient(0, margin_top, 0, margin_top + plot_h)
         top_color = QColor(self.line_color)
         top_color.setAlpha(130)
@@ -254,6 +269,7 @@ class LineChartWidget(QWidget):
         painter.setBrush(self.line_color)
         painter.drawEllipse(last_pt, 4, 4)
 
+        # Draw the dynamic badge displaying the most recent value
         badge_text = f"{last_y:.1f} {self.unit}"
         badge_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
         painter.setFont(badge_font)
@@ -286,6 +302,7 @@ class StatsPage(QWidget):
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(14)
 
+        # Back button configuration
         top_row = QHBoxLayout()
         btn_back = QPushButton("\u2190 Back to Simulation")
         btn_back.setStyleSheet("background-color: #455a64;")
@@ -310,6 +327,7 @@ class StatsPage(QWidget):
         self.row_sessions = self._build_tile(tiles_grid, 1, 1, "\U0001F697 Vehicles Served", "0")
         layout.addLayout(tiles_grid)
 
+        # Informational note regarding revenue settlement logic
         note = QLabel(
             "Note: Charging Revenue and Penalty Revenue are added to the lifetime "
             "totals when a vehicle is unplugged. Bills for vehicles still connected "
@@ -322,6 +340,7 @@ class StatsPage(QWidget):
         layout.addWidget(note)
         layout.addSpacing(12)
 
+        # Setup chart containers
         charts_title = QLabel("\U0001F4C8 Over Time")
         charts_title.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(charts_title)
@@ -352,6 +371,7 @@ class StatsPage(QWidget):
         self.setLayout(layout)
 
     def _build_tile(self, grid_layout, row, col, title, initial_value):
+        # Factory method to create uniform statistic display cards
         frame = QFrame()
         frame.setObjectName("StatCard")
         layout = QVBoxLayout()
@@ -368,10 +388,12 @@ class StatsPage(QWidget):
         return lbl_value
 
     def refresh(self):
+        # Fetch up-to-date lifetime metrics from the C engine
         charge_rev = gridflow_lib.getLifetimeChargeRevenue(self.station_ptr)
         penalty_rev = gridflow_lib.getLifetimePenaltyRevenue(self.station_ptr)
         sessions = gridflow_lib.getLifetimeSessionCount(self.station_ptr)
 
+        # Calculate live (unsettled) bills for active sessions
         pending = 0.0
         for i in range(NUM_SOCKETS):
             socket_id = i + 1
@@ -379,12 +401,14 @@ class StatsPage(QWidget):
                 pending += gridflow_lib.getChargeCost(self.station_ptr, socket_id)
                 pending += gridflow_lib.getIdleFee(self.station_ptr, socket_id)
 
+        # Update the UI labels
         self.row_charge.setText(f"\u20ba{charge_rev:.1f}")
         self.row_penalty.setText(f"\u20ba{penalty_rev:.1f}")
         self.row_total.setText(f"\u20ba{(charge_rev + penalty_rev):.1f}")
         self.row_pending.setText(f"\u20ba{pending:.1f}")
         self.row_sessions.setText(str(sessions))
 
+        # Push the latest historical data to the chart widgets
         self.load_chart.set_data(self.history_load)
         self.revenue_chart.set_data(self.history_revenue)
 
@@ -424,6 +448,8 @@ class IsoCanvas(QWidget):
         self.max_cap = 500.0
         self.clock_str = "--:--"
         self.is_night = False
+        
+        # Calculate dynamic positions based on socket count
         self._compute_layout()
         self.setMinimumSize(int(self.CANVAS_W * self.ZOOM), int(self.CANVAS_H * self.ZOOM))
 
@@ -437,6 +463,7 @@ class IsoCanvas(QWidget):
         self.refresh()
 
     def _compute_layout(self):
+        # Dynamically determine the grid size (rows/cols) based on NUM_SOCKETS
         n = NUM_SOCKETS
         cols = max(1, min(n, self.MAX_COLS))
         rows = (n + cols - 1) // cols
@@ -444,12 +471,15 @@ class IsoCanvas(QWidget):
         yard_w = cols * self.CELL_W
         yard_h = rows * self.CELL_H
         self.cols, self.rows = cols, rows
+        
         # The queue box sits above the yard at a fixed spot with a fixed
         # inner layout; adding/removing sockets only changes the yard below.
         self.queue_rect = QRectF(self.PAD, self.PAD, queue_w, self.QUEUE_H)
         self.yard_rect = QRectF(self.PAD, self.PAD + self.QUEUE_H + 30, yard_w, yard_h)
         self.CANVAS_W = max(yard_w, queue_w) + 2 * self.PAD
         self.CANVAS_H = self.yard_rect.bottom() + self.PAD
+        
+        # Pre-compute the exact center coordinates for each bay tile
         self.BAY_CENTERS = [
             (self.yard_rect.left() + self.CELL_W * ((i % cols) + 0.5),
              self.yard_rect.top() + self.CELL_H * (i // cols) + 125)
@@ -457,6 +487,7 @@ class IsoCanvas(QWidget):
         ]
 
     def refresh(self):
+        # Gather live status arrays from the C engine for the 3D rendering
         bays = []
         for i in range(NUM_SOCKETS):
             socket_id = i + 1
@@ -466,11 +497,14 @@ class IsoCanvas(QWidget):
             if not full:
                 bays.append({"type": type_name, "status": "EMPTY"})
                 continue
+            
             plate_raw = gridflow_lib.getPlateAt(self.station_ptr, socket_id)
             plate = plate_raw.decode('utf-8') if plate_raw else "?"
             soc = gridflow_lib.getSocketSOC(self.station_ptr, socket_id)
             target = gridflow_lib.getTargetSOC(self.station_ptr, socket_id)
             fee = gridflow_lib.getIdleFee(self.station_ptr, socket_id)
+            
+            # Determine correct UI state based on physical status limits
             if soc >= target:
                 status = "PENALTY" if fee > 0 else "FINISHED"
             else:
@@ -478,6 +512,7 @@ class IsoCanvas(QWidget):
             bays.append({"type": type_name, "status": status, "plate": plate, "soc": soc})
         self.bays = bays
 
+        # Poll the waiting queue and its ETA estimates
         qsize = gridflow_lib.getQueueSize(self.station_ptr)
         queue = []
         for idx in range(min(qsize, self.QUEUE_MAX_VISIBLE)):
@@ -491,11 +526,13 @@ class IsoCanvas(QWidget):
         self.queue = queue
         self.queue_total = qsize
 
+        # Retrieve global metrics for the overlaid dashboards
         self.grid_load = gridflow_lib.getTotalPower(self.station_ptr)
         self.max_cap = gridflow_lib.getMaxCapacity(self.station_ptr)
         clock_min = gridflow_lib.getStationClock(self.station_ptr)
         hour = (clock_min // 60) % 24
         self.clock_str = f"{hour:02d}:{clock_min % 60:02d}"
+        
         # Night mode: darker asphalt + headlight beams, purely a function of
         # the simulated clock we already read - no extra state, no timer.
         self.is_night = hour >= 19 or hour < 6
@@ -522,6 +559,7 @@ class IsoCanvas(QWidget):
         return stops[-1][1]
 
     def _iso_box(self, painter, cx, cy, hw, hd, h, base_color):
+        # Draws an isometric 3D box mathematically using polygon projections
         top_c = base_color.lighter(130)
         left_c = base_color.darker(115)
         right_c = base_color.darker(145)
@@ -536,16 +574,20 @@ class IsoCanvas(QWidget):
 
         painter.setPen(QPen(QColor(0, 0, 0, 90), 1))
 
+        # Right face
         painter.setBrush(QBrush(right_c))
         painter.drawPolygon(QPolygonF([b_right, b_bottom, t_bottom, t_right]))
 
+        # Left face
         painter.setBrush(QBrush(left_c))
         painter.drawPolygon(QPolygonF([b_left, b_bottom, t_bottom, t_left]))
 
+        # Top face
         painter.setBrush(QBrush(top_c))
         painter.drawPolygon(QPolygonF([t_top, t_right, t_bottom, t_left]))
 
     def _floor_diamond(self, painter, cx, cy):
+        # Draws the base isometric diamond representing the parking bay
         pts = [
             QPointF(cx, cy - self.TILE_H / 2 + 6),
             QPointF(cx + self.TILE_W / 2 - 6, cy),
@@ -580,6 +622,8 @@ class IsoCanvas(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(QColor("#0d0d10") if self.is_night else QColor("#232326")))
         painter.drawRoundedRect(r, 26, 26)
+        
+        # Add dashed lane divisions
         painter.setPen(QPen(QColor(255, 255, 255, 16), 3, Qt.PenStyle.DashLine))
         for c in range(1, self.cols):
             x = r.left() + c * self.CELL_W
@@ -589,6 +633,7 @@ class IsoCanvas(QWidget):
             painter.drawLine(QPointF(r.left() + 25, y), QPointF(r.right() - 25, y))
 
     def _text_center(self, painter, x, y, s, font, color):
+        # Utility to accurately center-align text at a given coordinate
         painter.setFont(font)
         painter.setPen(QColor(color))
         fm = painter.fontMetrics()
@@ -624,11 +669,13 @@ class IsoCanvas(QWidget):
         c2 = QColor(255, 248, 210, 0)
         gradient.setColorAt(0.0, c1)
         gradient.setColorAt(1.0, c2)
+        
         path = QPainterPath()
         path.moveTo(cx, cy)
         path.lineTo(cx + direction * 90, cy + 16)
         path.lineTo(cx + direction * 90, cy + 56)
         path.closeSubpath()
+        
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(gradient))
         painter.drawPath(path)
@@ -654,6 +701,7 @@ class IsoCanvas(QWidget):
             painter.drawEllipse(QPointF(0, 0), 40 * scale, 40 * scale)
             painter.restore()
 
+        # If a sprite image was successfully loaded, draw the sprite
         if self.car_pixmap is not None:
             w = 78.0 * scale
             h = w * self.car_pixmap.height() / self.car_pixmap.width()
@@ -662,6 +710,7 @@ class IsoCanvas(QWidget):
             painter.drawPixmap(QRectF(cx - w / 2, top_y, w, h), self.car_pixmap, QRectF(self.car_pixmap.rect()))
             return h + 4 * scale
 
+        # Fallback to programmatic geometric rendering
         return self._draw_flat_car_fallback(painter, cx, cy, status_color, scale)
 
     def _draw_flat_car_fallback(self, painter, cx, cy, status_color, scale=1.0):
@@ -723,6 +772,7 @@ class IsoCanvas(QWidget):
         fill_top_y = bottom_y - fill_h
         color = self._soc_color(soc)
 
+        # Draw the translucent outer shell
         painter.setPen(QPen(QColor(255, 255, 255, 55), 1))
         painter.setBrush(QBrush(QColor(255, 255, 255, 12)))
         painter.drawEllipse(QPointF(cx, shell_top_y), rw, rh)
@@ -730,6 +780,7 @@ class IsoCanvas(QWidget):
         painter.drawLine(QPointF(cx + rw, shell_top_y), QPointF(cx + rw, bottom_y))
         painter.drawEllipse(QPointF(cx, bottom_y), rw, rh)
 
+        # Draw the dynamic solid fill level
         fill_color = QColor(color)
         fill_color.setAlpha(150)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -744,10 +795,12 @@ class IsoCanvas(QWidget):
         painter.setBrush(QBrush(fill_color.lighter(125)))
         painter.drawEllipse(QPointF(cx, fill_top_y), rw, rh)
 
+        # Display the numeric percentage on top
         self._text_center(painter, cx, shell_top_y - 8, f"{soc:.0f}%",
                            QFont("Segoe UI", 9, QFont.Weight.Bold), "#ffffff")
 
     def _draw_bay_geometry(self, painter, cx, cy, data):
+        # Build the structural components of a charging bay
         self._floor_diamond(painter, cx, cy)
         self._draw_socket_icon(painter, cx, cy)
 
@@ -791,10 +844,13 @@ class IsoCanvas(QWidget):
             # anchored/pointed off the rear, looking like it shone backward.
             self._draw_headlight(painter, car_x - 32, car_y - 8, direction=-1)
 
-        soc = data.get("soc", 0.0)
-        self._draw_holo_cylinder(painter, car_x + 30, car_y - car_height - 6, soc)
+        # Ensure the holographic cylinder disappears immediately when the charging target is met.
+        if status == "CHARGING":
+            soc = data.get("soc", 0.0)
+            self._draw_holo_cylinder(painter, car_x + 30, car_y - car_height - 6, soc)
 
     def _draw_bay_labels(self, painter, cx, cy, socket_id, data):
+        # Draw floating text UI layers independently so they overlay models perfectly
         type_name = data["type"]
         status = data["status"]
 
@@ -828,6 +884,8 @@ class IsoCanvas(QWidget):
         painter.setPen(QColor("#9e9e9e"))
         painter.drawText(int(box.left() + 20), int(box.top() + 26), f"WAITING QUEUE ({self.queue_total})")
         hidden = self.queue_total - len(self.queue)
+        
+        # Display indicator if more vehicles exist than can be rendered
         if hidden > 0:
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(int(box.right() - 90), int(box.top() + 26), f"+{hidden} more")
@@ -858,6 +916,7 @@ class IsoCanvas(QWidget):
             
 
     def paintEvent(self, event):
+        # Entry point for Qt's rendering cycle
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bg_color = QColor("#0a0a0f") if self.is_night else QColor("#121212")
@@ -899,6 +958,7 @@ class IsoPage(QWidget):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(8)
 
+        # Build top navigation layout
         top_row = QHBoxLayout()
         btn_back = QPushButton("\u2190 Back to Simulation")
         btn_back.setStyleSheet("background-color: #455a64;")
@@ -925,6 +985,7 @@ class IsoPage(QWidget):
         self.setLayout(layout)
 
     def _build_mini_tile(self, parent_layout, title, initial_value):
+        # Factory helper to construct top navigation stat elements
         frame = QFrame()
         frame.setObjectName("StatCard")
         box = QVBoxLayout()
@@ -941,6 +1002,7 @@ class IsoPage(QWidget):
         return lbl_value
 
     def refresh(self):
+        # Force a refresh of the 3D drawing and synchronize the header telemetry
         self.canvas.refresh()
         self.grid_load_label.setText(f"{self.canvas.grid_load:.0f} / {self.canvas.max_cap:.0f} kW")
         self.clock_label.setText(self.canvas.clock_str)
@@ -1243,6 +1305,7 @@ class SimulationPage(QWidget):
         return lbl_value
 
     def update_bar_style(self, idx, is_empty=False, is_penalty=False, is_finished=False):
+        # Maps the status of the vehicle to progress bar colors: empty, penalty, finished grace period, or charging.
         bar = self.ui_progress_bars[idx]
         if is_empty:
             bar.setStyleSheet("QProgressBar { background-color: #262626; border-radius: 7px; } QProgressBar::chunk { background-color: transparent; }")
@@ -1353,6 +1416,7 @@ class SimulationPage(QWidget):
     # ---------- Single source of truth: redraw everything from C ----------
 
     def sync_ui(self):
+        # Triggers a full UI refresh by exclusively reading data through the C interface getters.
         clock_min = gridflow_lib.getStationClock(self.station_ptr)
         self.clock_label.setText(f"{(clock_min // 60) % 24:02d}:{clock_min % 60:02d}")
 
@@ -1459,6 +1523,7 @@ class SimulationPage(QWidget):
 
 
 class GridFlowApp(QMainWindow):
+    """The main application window that orchestrates navigation between simulation, stats, and 3D views."""
     def __init__(self, station_ptr):
         super().__init__()
         self.station_ptr = station_ptr
@@ -1516,6 +1581,7 @@ class GridFlowApp(QMainWindow):
         self.stack.setCurrentIndex(0)
 
     def record_history(self, elapsed_minutes, grid_load_kw, lifetime_revenue):
+        # Appends new telemetry points for charting, keeping the array within limits
         self.history_load.append((elapsed_minutes, grid_load_kw))
         self.history_revenue.append((elapsed_minutes, lifetime_revenue))
         if len(self.history_load) > self.history_cap:

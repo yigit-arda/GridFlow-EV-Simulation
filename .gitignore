@@ -1,0 +1,13 @@
+# C Derleme Çıktıları
+*.dll
+*.o
+*.exe
+
+# Python Önbellek Dosyaları
+__pycache__/
+*.pyc
+
+# Editör/İşletim Sistemi Dosyaları
+.vscode/
+.idea/
+.DS_Store

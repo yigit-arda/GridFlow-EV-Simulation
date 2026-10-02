@@ -1,3 +1,5 @@
+/* station_manager.c */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +43,7 @@ static void recomputeGridDistribution(Station *station) {
     if (desired == NULL) return;
     float totalDesired = 0.0f;
 
+    /* First pass: Poll each socket to determine its current ideal power demand. */
     for (int i = 0; i < n; i++) {
         if (station->sockets[i].isFull) {
             EVehicle *car = station->sockets[i].connectedVehicle;
@@ -55,11 +58,13 @@ static void recomputeGridDistribution(Station *station) {
         }
     }
 
+    /* Check for grid bottleneck and compute the proportional throttling ratio if needed. */
     float scale = 1.0f;
     if (totalDesired > station->maxGridCap && totalDesired > 0.0f) {
         scale = station->maxGridCap / totalDesired;
     }
 
+    /* Second pass: Apply the scale to enforce grid limits and explicitly overwrite the physical state. */
     float sumActual = 0.0f;
     for (int i = 0; i < n; i++) {
         float actual = desired[i] * scale;
@@ -73,6 +78,7 @@ static void recomputeGridDistribution(Station *station) {
 
 Station *initStation(float maxCapacity, int totalSocketNo) {
 
+    /* Allocate memory for the station struct. */
     Station *newStation = malloc(sizeof(Station));
 
     if (newStation == NULL) {
@@ -85,6 +91,7 @@ Station *initStation(float maxCapacity, int totalSocketNo) {
 
     newStation->totCurrPwr = 0.0;
 
+    /* Allocate memory for the socket array based on the requested count. */
     newStation->sockets = malloc(sizeof(ChargingSocket) * totalSocketNo);
 
     for (int i = 0; i < totalSocketNo; i++) {
@@ -96,7 +103,7 @@ Station *initStation(float maxCapacity, int totalSocketNo) {
 
         newStation->sockets[i].connectedVehicle = NULL;
 
-
+        /* Assign first half of the sockets as AC, the rest as DC. */
         if (i < totalSocketNo / 2) {
             newStation->sockets[i].charge_type = AC_TYPE2;
         } else {
@@ -104,6 +111,7 @@ Station *initStation(float maxCapacity, int totalSocketNo) {
         }
     }
 
+    /* Setup the waiting queue for overflowing vehicles. */
     newStation->waitList = malloc(sizeof(WaitQueue));
 
     if (newStation->waitList == NULL) {
@@ -116,6 +124,7 @@ Station *initStation(float maxCapacity, int totalSocketNo) {
     newStation->waitList->currentSize = 0;
 
 
+    /* Set default configuration and pricing parameters. */
     newStation->currentTime = 0;
     newStation->idleGracePeriod = 15;
     newStation->feePerMinute = 5.0;
@@ -128,6 +137,7 @@ Station *initStation(float maxCapacity, int totalSocketNo) {
     newStation->lifetimeSessionCount = 0;
 
 
+    /* Record the real OS time to serve as the start anchor for UI timestamps. */
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
     newStation->baseStartMinute = (tm->tm_hour * 60) + tm->tm_min;
@@ -160,7 +170,7 @@ EVehicle *createVehicle(const char *plate, ChargeType type, float currSoc, float
 
     newCar->chgPrio = prio;
 
-
+    /* Initialize session-specific values to zero. */
     newCar->plugInTime = 0;
     newCar->expectedFinishTime = 0;
     newCar->idleFee = 0.0;
@@ -172,6 +182,7 @@ EVehicle *createVehicle(const char *plate, ChargeType type, float currSoc, float
 }
 
 void freeVehicle(EVehicle *car) {
+    /* Safely release vehicle memory if it exists. */
     if (car != NULL) {
         free(car);
     }
@@ -181,6 +192,7 @@ void freeStation(Station *station) {
 
     if (station != NULL) {
 
+        /* Release any vehicles still attached to the sockets to prevent leaks. */
         if (station->sockets != NULL) {
             for (int i = 0; i < station->totalSocketNo; i++) {
                 if (station->sockets[i].connectedVehicle != NULL) {
@@ -191,6 +203,7 @@ void freeStation(Station *station) {
             free(station->sockets);
         }
 
+        /* Iterate through the queue and release all waiting vehicles. */
         if (station->waitList != NULL) {
 
             QueueNode *current = station->waitList->head;
@@ -233,12 +246,14 @@ bool enqueueVehicle(WaitQueue *queue, EVehicle *car) {
     newNode->next = NULL;
 
 
+    /* Insert at head if list is empty or new car has higher priority (lower value). */
     if (queue->head == NULL || car->chgPrio < queue->head->car->chgPrio) {
 
         newNode->next = queue->head;
 
         queue->head = newNode;
     } else {
+        /* Traverse to find the correct priority insertion point. */
         QueueNode *current = queue->head;
 
         while (current->next != NULL && current->next->car->chgPrio <= car->chgPrio) {
@@ -289,6 +304,7 @@ int plugVehicle(Station *station, EVehicle *car) {
         return -1;
     }
 
+    /* Search for an available socket that matches the vehicle's charge type. */
     for (int i = 0; i < station->totalSocketNo; i++) {
 
         if (station->sockets[i].isFull == false && station->sockets[i].charge_type == car->charge_type) {
@@ -308,6 +324,7 @@ int plugVehicle(Station *station, EVehicle *car) {
 
             car->expectedFinishTime = station->currentTime + requiredMinutes;
 
+            /* Format the raw simulation minutes into readable HH:MM log output. */
             int plugRealTotal = station->baseStartMinute + car->plugInTime;
             int plugHour = (plugRealTotal / 60) % 24;
             int plugMin = plugRealTotal % 60;
@@ -329,6 +346,7 @@ int plugVehicle(Station *station, EVehicle *car) {
         }
     }
 
+    /* Fallback: if no compatible empty socket is found, send the vehicle to the queue. */
     printf("No available socket found. Vehicle %s is being added to the queue...\n", car->license_plate);
     return enqueueVehicle(station->waitList, car) ? 0 : -1;
 }
@@ -362,6 +380,7 @@ void unplugVehicle(Station *station, int socketID) {
         return;
     }
 
+    /* Adjust physical ID back to 0-indexed array position. */
     int realID = socketID - 1;
 
     if (station->sockets[realID].isFull == false) {
@@ -377,6 +396,7 @@ void unplugVehicle(Station *station, int socketID) {
         station->lifetimePenaltyRevenue += leaving->idleFee;
         station->lifetimeSessionCount += 1;
 
+        /* Erase the vehicle and clear the socket for the next user. */
         freeVehicle(leaving);
         station->sockets[realID].connectedVehicle = NULL;
         station->sockets[realID].currPwr = 0.0;
@@ -386,6 +406,7 @@ void unplugVehicle(Station *station, int socketID) {
     }
 
 
+    /* Autopilot capability: check if another vehicle is waiting and pull it in immediately. */
     EVehicle *nextCar = dequeueVehicle(station->waitList);
 
     if (nextCar != NULL) {
@@ -412,6 +433,7 @@ void advanceTime(Station *station, int minutes) {
      * what makes sockets.currPwr trustworthy for the rest of this tick. */
     recomputeGridDistribution(station);
 
+    /* Process physical charging operations and penalty accumulations for all occupied sockets. */
     for (int i = 0; i < station->totalSocketNo; i++) {
 
         if (station->sockets[i].isFull == true) {
@@ -472,25 +494,30 @@ void advanceTime(Station *station, int minutes) {
 
 /* ---------------- Getters ---------------- */
 
+/* Internal helper to prevent buffer overflows and segmentation faults from bad GUI inputs. */
 static bool validSocket(Station *station, int socketID) {
     return station != NULL && socketID > 0 && socketID <= station->totalSocketNo;
 }
 
+/* Safe getter for checking if a socket is occupied. */
 bool isSocketFull(Station *station, int socketID) {
     if (!validSocket(station, socketID)) return false;
     return station->sockets[socketID - 1].isFull;
 }
 
+/* Safe getter for the socket's hardware connector type. */
 ChargeType getSocketChargeType(Station *station, int socketID) {
     if (!validSocket(station, socketID)) return AC_TYPE2;
     return station->sockets[socketID - 1].charge_type;
 }
 
+/* Safe getter for the connected vehicle's license plate. */
 const char *getPlateAt(Station *station, int socketID) {
     if (!validSocket(station, socketID) || !station->sockets[socketID - 1].isFull) return NULL;
     return station->sockets[socketID - 1].connectedVehicle->license_plate;
 }
 
+/* Safe getter for the connected vehicle's current state of charge. */
 float getSocketSOC(Station *station, int socketID) {
     int realID = socketID - 1;
     if (validSocket(station, socketID) && station->sockets[realID].isFull) {
@@ -499,6 +526,7 @@ float getSocketSOC(Station *station, int socketID) {
     return 0.0;
 }
 
+/* Safe getter for the connected vehicle's target state of charge. */
 float getTargetSOC(Station *station, int socketID) {
     int realID = socketID - 1;
     if (validSocket(station, socketID) && station->sockets[realID].isFull) {
@@ -507,6 +535,7 @@ float getTargetSOC(Station *station, int socketID) {
     return 0.0;
 }
 
+/* Safe getter for the connected vehicle's active charging cost. */
 float getChargeCost(Station *station, int socketID) {
     int realID = socketID - 1;
     if (validSocket(station, socketID) && station->sockets[realID].isFull) {
@@ -515,6 +544,7 @@ float getChargeCost(Station *station, int socketID) {
     return 0.0;
 }
 
+/* Safe getter for the connected vehicle's accumulated penalty. */
 float getIdleFee(Station *station, int socketID) {
     int realID = socketID - 1;
     if (validSocket(station, socketID) && station->sockets[realID].isFull) {
@@ -523,6 +553,7 @@ float getIdleFee(Station *station, int socketID) {
     return 0.0;
 }
 
+/* Safe getter for the connected vehicle's expected completion time. */
 int getExpectedFinishReal(Station *station, int socketID) {
     int realID = socketID - 1;
     if (validSocket(station, socketID) && station->sockets[realID].isFull) {
@@ -541,11 +572,13 @@ float getActivePower(Station *station, int socketID) {
     return 0.0;
 }
 
+/* Safe getter for the length of the waiting queue. */
 int getQueueSize(Station *station) {
     if (station == NULL || station->waitList == NULL) return 0;
     return station->waitList->currentSize;
 }
 
+/* Iterates through the linked list to retrieve a queued vehicle's plate by its index. */
 const char *getQueuePlateAt(Station *station, int index) {
     if (station == NULL || station->waitList == NULL || index < 0) return NULL;
 
@@ -559,6 +592,7 @@ const char *getQueuePlateAt(Station *station, int index) {
     return NULL;
 }
 
+/* Iterates through the linked list to retrieve a queued vehicle's charge type. */
 int getQueueChargeTypeAt(Station *station,int index){
 
     if(station == NULL || station->waitList == NULL || index<0){
@@ -580,6 +614,7 @@ int getQueueChargeTypeAt(Station *station,int index){
 int getQueueEstimatedWaitMinutes(Station *station, int index) {
     if (station == NULL || station->waitList == NULL || index < 0) return -1;
 
+    /* Locate the target vehicle inside the queue. */
     QueueNode *target = station->waitList->head;
     int i = 0;
     while (target != NULL && i < index) { target = target->next; i++; }
@@ -587,6 +622,8 @@ int getQueueEstimatedWaitMinutes(Station *station, int index) {
 
     ChargeType type = target->car->charge_type;
     int n = station->totalSocketNo;
+    
+    /* Dynamically allocate array for finish times to prevent buffer problems on different compilers. */
     int *finishTimes = malloc(sizeof(int) * n);
     if (finishTimes == NULL) return -1;
     int count = 0;
@@ -622,22 +659,26 @@ int getQueueEstimatedWaitMinutes(Station *station, int index) {
         cur = cur->next;
     }
 
+    /* Assign the queued vehicle to the logically next available slot and calculate pure wait duration. */
     int slot = (aheadCount >= count) ? count - 1 : aheadCount;
     int waitMinutes = finishTimes[slot] - station->currentTime;
     free(finishTimes);
     return (waitMinutes < 0) ? 0 : waitMinutes;
 }
 
+/* Safe getter for the total grid power. */
 float getTotalPower(Station *station) {
     if (station == NULL) return 0.0;
     return station->totCurrPwr;
 }
 
+/* Safe getter for the station's grid capacity. */
 float getMaxCapacity(Station *station) {
     if (station == NULL) return 0.0;
     return station->maxGridCap;
 }
 
+/* Safe getter for the readable simulation clock. */
 int getStationClock(Station *station) {
     if (station == NULL) return 0;
     return station->baseStartMinute + station->currentTime;
@@ -648,16 +689,19 @@ int getElapsedMinutes(Station *station) {
     return station->currentTime;
 }
 
+/* Safe getter for tracking the running lifetime charging cashflow. */
 float getLifetimeChargeRevenue(Station *station) {
     if (station == NULL) return 0.0;
     return station->lifetimeChargeRevenue;
 }
 
+/* Safe getter for tracking the running lifetime penalty cashflow. */
 float getLifetimePenaltyRevenue(Station *station) {
     if (station == NULL) return 0.0;
     return station->lifetimePenaltyRevenue;
 }
 
+/* Safe getter for tracking the running total of serviced vehicles. */
 int getLifetimeSessionCount(Station *station) {
     if (station == NULL) return 0;
     return station->lifetimeSessionCount;
