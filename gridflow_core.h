@@ -143,6 +143,7 @@ int getQueueEstimatedWaitMinutes(Station *station, int index);
 float getTotalPower(Station *station);
 float getMaxCapacity(Station *station);
 int getStationClock(Station *station);
+int getQueueChargeTypeAt(Station *station, int index);
 
 
 /* Monotonic simulated minutes elapsed since the station started (unlike

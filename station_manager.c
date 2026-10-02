@@ -458,6 +458,16 @@ void advanceTime(Station *station, int minutes) {
 
         }
     }
+    /* Recompute again now that currBatLvl/expectedFinishTime reflect this
+     * tick's deliveries: the call at the top of this function only knew
+     * about *last* tick's state, so a vehicle that just now reached its
+     * target would otherwise still report last tick's nonzero currPwr (in
+     * both getActivePower for that socket and the aggregate grid-load
+     * total) until the *next* advanceTime call. Recomputing here closes
+     * that gap immediately, in the same tick, and also lets any capacity
+     * it just freed up get fairly redistributed to other still-charging
+     * sockets right away instead of waiting a tick. */
+    recomputeGridDistribution(station);
 }
 
 /* ---------------- Getters ---------------- */
@@ -547,6 +557,24 @@ const char *getQueuePlateAt(Station *station, int index) {
         i++;
     }
     return NULL;
+}
+
+int getQueueChargeTypeAt(Station *station,int index){
+
+    if(station == NULL || station->waitList == NULL || index<0){
+        return -1;
+    }
+
+    QueueNode *current = station->waitList->head;
+    int i=0;
+    while(current != NULL){
+        if(i==index){
+            return (int)current->car->charge_type;   
+        }
+        current = current->next;
+        i++;
+    }
+    return -1;
 }
 
 int getQueueEstimatedWaitMinutes(Station *station, int index) {
